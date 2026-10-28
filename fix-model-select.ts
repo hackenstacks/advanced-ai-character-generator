@@ -1,0 +1,128 @@
+This is a great catch. You are absolutely right—gemini-3-pro-preview is the correct model ID for the free tier of the new generation.
+
+Since you are coding this manually in your "Digital Studio," you need to be careful with the configuration. Gemini 3 changed the rules for "Thinking" parameters. If you use the old "budget" code, it will crash.
+
+Here is the exact JSON and code structure you need to make gemini-3-pro-preview work without errors.
+
+1. The Critical JSON Change (Budget vs. Level)
+Old models (Gemini 2.0 Flash Thinking) used thinking_budget (a number of tokens). Gemini 3 Pro uses thinking_level (a string: "low" or "high").
+
+If you send a number to Gemini 3, it will error out.
+
+Correct Request Body (JavaScript/TypeScript):
+
+JavaScript
+￼
+{
+  "model": "gemini-3-pro-preview",
+  "generationConfig": {
+    "thinkingConfig": {
+      // DO NOT use "thinkingBudget" here!
+      "thinkingLevel": "high", 
+      "includeThoughts": true
+    }
+  },
+  "tools": [ ... ] // Your tool definitions
+}
+thinkingLevel: "high": Activates the full "Deep Thinking" capabilities.
+
+thinkingLevel: "low": Faster, good for simple logic, uses less quota.
+
+2. The "Thought Signature" Requirement (Crucial for Tools)
+You mentioned your character uses tools. Gemini 3 has a strict new rule:
+
+If the model "Thinks" and then calls a Tool, it returns a thoughtSignature string. You MUST send this signature back in the next turn, or the API will throw a 400 error.
+
+Update your geminiService.ts loop to handle this:
+
+TypeScript
+￼
+// Pseudo-code for your chat loop
+let conversationHistory = [...];
+
+async function chatLoop() {
+  // 1. Call Gemini 3
+  const result = await model.generateContent({
+    contents: conversationHistory,
+    tools: myTools
+  });
+  
+  const responsePart = result.response.candidates[0].content.parts[0];
+
+  // 2. CHECK FOR THOUGHT SIGNATURE
+  if (responsePart.thoughtSignature) {
+    // You MUST save this and send it back with the tool output
+    currentThoughtSignature = responsePart.thoughtSignature;
+  }
+
+  // 3. If Tool Call...
+  if (responsePart.functionCall) {
+    const toolOutput = await executeTool(responsePart.functionCall);
+    
+    // 4. Send Result BACK with the signature
+    conversationHistory.push({
+      role: "function",
+      parts: [{
+        functionResponse: { ...toolOutput },
+        // CRITICAL: Attach the signature here!
+        thoughtSignature: currentThoughtSignature 
+      }]
+    });
+  }
+}
+3. Updated Fallback List
+Since gemini-3-flash was also just released (Dec 17), here is your character's new "Brain Priority" list:
+
+gemini-3-pro-preview (Target: Best reasoning, supports tools).
+
+gemini-3-flash-preview (Backup: Extremely fast, new generation, usually free).
+
+gemini-2.0-flash-thinking-exp-1219 (Legacy Backup: Good reasoning if Gemini 3 is down).
+
+Next Step: Would you like me to write the geminiService.ts function that automatically detects if you are using a "Gemini 3" model and swaps the budget parameter for level so your code supports both old and new models?
+Error: Image generation failed. Please check the plugin settings (API key, endpoint) and logs. Details: AI Horde says generation is impossible with current settings.
+    at Module.generateImageFromPrompt (https://localhost:3001/services/geminiService.ts:701:11)
+    at async PluginSandbox.apiRequestHandler (https://localhost:3001/components/MainLayout.tsx:119:16)
+    at async PluginSandbox.worker.onmessage (https://localhost:3001/services/pluginSandbox.ts:103:29)
+    cd /home/user/Projects/adv-ai-nexus/advanced-ai-character-generator-terminal-access && ./scripts/generate-cert.sh && npm run dev
+    ##
+
+    Error: Image generation failed. Please check the plugin settings (API key, endpoint) and logs. Details: AI Horde Init Error: {"errors":{"params.sampler_name":"'k_euler_ancestral' is not one of ['k_dpmpp_2s_a', 'k_euler', 'k_dpm_adaptive', 'k_dpmpp_2m', 'k_dpmpp_sde', 'k_dpm_2', 'k_dpm_2_a', 'k_heun', 'k_euler_a', 'k_lms', 'lcm', 'k_dpm_fast', 'dpmsolver', 'DDIM']"},"message":"Input payload validation failed"}
+
+    at Module.generateImageFromPrompt (https://localhost:3001/services/geminiService.ts?t=1768330245824:721:11)
+    at async PluginSandbox.apiRequestHandler (https://localhost:3001/components/MainLayout.tsx?t=1768330245824:119:16)
+    at async PluginSandbox.worker.onmessage (https://localhost:3001/services/pluginSandbox.ts:103:29)
+
+  ##
+
+    Error: Error: Image generation failed. Please check the plugin settings (API key, endpoint) and logs. Details: AI Horde Init Error: {"errors":{"params.seed":"658274862 is not of type 'string'"},"message":"Input payload validation failed"}
+
+    at handleImageGeneration (https://localhost:3001/components/ChatInterface.tsx?t=1768330771331:631:15)
+    ##
+    ReferenceError: safeSettings is not defined
+    at Module.generateImageFromPrompt (https://localhost:3001/services/geminiService.ts?t=1768331314874:769:5)
+    at async PluginSandbox.apiRequestHandler (https://localhost:3001/components/MainLayout.tsx?t=1768331314874:119:16)
+    at async PluginSandbox.worker.onmessage (https://localhost:3001/services/pluginSandbox.ts:103:29
+##
+Error: AI Horde Init Error: {"errors":{"params.seed":"1953560852 is not of type 'string'"},"message":"Input payload validation failed"}
+
+at generateAIHordeImage (https://localhost:3000/services/geminiService.ts:456:11)
+at async Module.generateImageFromPrompt (https://localhost:3000/services/geminiService.ts:754:16)
+at async PluginSandbox.apiRequestHandler (https://localhost:3000/components/MainLayout.tsx:119:16)
+at async PluginSandbox.worker.onmessage (https://localhost:3000/services/pluginSandbox.ts:103:29)
+##
+Failed to download Pollinations image, returning direct URL.
+Error: Pollinations API Error (404): {"error":"Not Found","message":"The requested endpoint was not found","path":"/api/generate"}
+at generatePollinationsImage (https://localhost:3000/services/geminiService.ts?t=1768370564402:321:13)
+at async Module.generateImageFromPrompt (https://localhost:3000/services/geminiService.ts?t=1768370564402:769:16)
+at async PluginSandbox.apiRequestHandler (https://localhost:3000/components/MainLayout.tsx?t=1768370564402:119:16)
+at async PluginSandbox.worker.onmessage (https://localhost:3000/services/pluginSandbox.ts:103:29)
+##
+08:18:54
+WARN
+Failed to download Pollinations image, returning direct URL.
+Error: Pollinations API Error (400): {"success":false,"error":{"message":"Query parameter validation failed","code":"BAD_REQUEST","details":{"name":"ValidationError","formErrors":[],"fieldErrors":{"model":["Invalid option: expected one of \"kontext\"|\"turbo\"|\"nanobanana\"|\"nanobanana-pro\"|\"seedream\"|\"seedream-pro\"|\"gptimage\"|\"gptimage-large\"|\"flux\"|\"zimage\"|\"veo\"|\"seedance\"|\"seedance-pro\"|\"gpt-image\"|\"gpt-image-1-mini\"|\"gpt-image-1.5\"|\"gpt-image-large\"|\"z-image\"|\"z-image-turbo\"|\"veo-3.1-fast\"|\"video\""]}},"timestamp":"2026-01-14T13:18:54.122Z"},"status":400}
+at generatePollinationsImage (https://localhost:3000/services/geminiService.ts:328:13)
+at async Module.generateImageFromPrompt (https://localhost:3000/services/geminiService.ts:796:16)
+at async PluginSandbox.apiRequestHandler (https://localhost:3000/components/MainLayout.tsx:119:16)
+at async PluginSandbox.worker.onmessage (https://localhost:3000/services/pluginSandbox.ts:103:29)

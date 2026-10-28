@@ -1,0 +1,22 @@
+# Build output
+dist/
+*.bak-*
+*.bak
+
+# Dependencies
+node_modules/
+
+# Secrets
+.env
+*.env
+nexus.env
+*.key
+*.pem
+
+# Local data
+*.bin
+*.sqlite
+*.db
+
+# OS
+.DS_Store

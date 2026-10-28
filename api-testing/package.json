@@ -1,0 +1,30 @@
+{
+  "name": "ai-nexus-api-tester",
+  "version": "1.0.0",
+  "description": "Standalone API Tester for AI Nexus - Tests image generation and chat APIs",
+  "main": "api-tester.js",
+  "scripts": {
+    "test": "node api-tester.js",
+    "test:images": "node api-tester.js image",
+    "test:chat": "node api-tester.js chat",
+    "test:aihorde": "node api-tester.js image aihorde",
+    "test:gemini": "node api-tester.js image gemini",
+    "test:ollama": "node api-tester.js chat ollama",
+    "help": "node api-tester.js --help"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "node-fetch": "^2.7.0"
+  },
+  "type": "module",
+  "keywords": [
+    "ai",
+    "api",
+    "testing",
+    "debugging",
+    "image-generation",
+    "chat"
+  ],
+  "author": "AI Nexus Development",
+  "license": "MIT"
+}

@@ -1,0 +1,16 @@
+{
+  "id": "default-image-generator",
+  "name": "Image Generation",
+  "description": "Generates images from prompts. Single-click the image icon for a prompt, double-click to summarize chat context.",
+  "enabled": true,
+  "code": "\n// Default Image Generation Plugin\nnexus.hooks.register('generateImage', async (payload) => {\n  try {\n    let prompt;\n    if (payload.type === 'summary') {\n      nexus.log('Summarizing content for image prompt...');\n      const summaryPrompt = `Based on the following conversation, create a short, visually descriptive prompt for an image generation model. The prompt should capture the essence of the last few messages. Be creative and concise. Conversation:\\n\\n${payload.value}`;\n      prompt = await nexus.gemini.generateContent(summaryPrompt);\n      nexus.log('Generated prompt from summary:', prompt);\n    } else {\n      prompt = payload.value;\n      nexus.log('Using direct prompt:', prompt);\n    }\n    \n    // The main app passes the plugin settings as part of the request.\n    const settings = payload.settings || {};\n    \n    const imageUrl = await nexus.gemini.generateImage(prompt, settings);\n    return { url: imageUrl };\n\n  } catch (error) {\n    nexus.log('Error in image generation plugin:', error);\n    // Return an error structure that the UI can handle\n    return { error: String(error) };\n  }\n});\nnexus.log('Image Generation plugin loaded.');\n",
+  "settings": {
+    "service": "openai",
+    "apiFormat": "custom",
+    "apiEndpoint": "https://image.pollinations.ai/prompt/",
+    "model": "flux",
+    "customRequestBody": "GET_REQUEST",
+    "style": "Default (None)",
+    "negativePrompt": ""
+  }
+}cd /home/user/Projects/adv-ai-nexus/advanced-ai-character-generator-terminal-access && ./scripts/generate-cert.sh && npm run dev

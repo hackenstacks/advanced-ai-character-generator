@@ -1,0 +1,140 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { Plugin, ApiConfig, ConfirmationRequest } from '../types.ts';
+import { logger } from '../services/loggingService.ts';
+import { PlusIcon } from './icons/PlusIcon.tsx';
+import { TrashIcon } from './icons/TrashIcon.tsx';
+import { EditIcon } from './icons/EditIcon.tsx';
+import { PowerIcon } from './icons/PowerIcon.tsx';
+import { UploadIcon } from './icons/UploadIcon.tsx';
+import { DownloadIcon } from './icons/DownloadIcon.tsx';
+
+interface PluginFormState {
+  name: string;
+  description: string;
+  enabled: boolean;
+  settings: {
+    service?: string;
+    apiKey?: string;
+    [key: string]: any;
+  };
+}
+
+const IMAGE_PROVIDERS = [
+  { value: 'aihorde', label: 'AI Horde (Default)' },
+  { value: 'openai', label: 'OpenAI' },
+  { value: 'pollinations', label: 'Pollinations.ai' },
+  { value: 'default', label: 'Google Gemini' }
+];
+
+export function PluginManager() {
+  const [plugins, setPlugins] = useState<Plugin[]>([]);
+  const [formState, setFormState] = useState<PluginFormState>({
+    name: '',
+    description: '',
+    enabled: true,
+    settings: {
+      service: 'aihorde'
+    }
+  });
+
+  const service = formState.settings?.service || 'aihorde';
+
+  const handleSettingsChange = (key: string, value: any) => {
+    setFormState(prev => ({
+      ...prev,
+      settings: {
+        ...prev.settings,
+        [key]: value
+      }
+    }));
+  };
+
+  return (
+    <div className="space-y-4">
+
+      {/* Image Provider Selection */}
+      <div>
+        <label className="block text-sm font-medium mb-1">
+          Image Provider
+        </label>
+        <select
+          className="input"
+          value={service}
+          onChange={(e) => handleSettingsChange('service', e.target.value)}
+        >
+          {IMAGE_PROVIDERS.map(p => (
+            <option key={p.value} value={p.value}>
+              {p.label}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {/* AI Horde API Key (Optional) */}
+      {service === 'aihorde' && (
+        <div>
+          <label className="block text-sm font-medium mb-1">
+            AI Horde API Key (optional)
+          </label>
+          <input
+            type="password"
+            className="input"
+            placeholder="0000000000 for anonymous"
+            value={formState.settings?.apiKey || ''}
+            onChange={(e) => handleSettingsChange('apiKey', e.target.value)}
+          />
+        </div>
+      )}
+
+      {/* Pollinations API Key (Required) */}
+      {service === 'pollinations' && (
+        <div>
+          <label className="block text-sm font-medium mb-1">
+            Pollinations API Key
+          </label>
+          <input
+            type="password"
+            className="input"
+            placeholder="Required"
+            value={formState.settings?.apiKey || ''}
+            onChange={(e) => handleSettingsChange('apiKey', e.target.value)}
+            required
+          />
+        </div>
+      )}
+
+      {/* OpenAI API Key */}
+      {service === 'openai' && (
+        <div>
+          <label className="block text-sm font-medium mb-1">
+            OpenAI API Key
+          </label>
+          <input
+            type="password"
+            className="input"
+            placeholder="Required"
+            value={formState.settings?.apiKey || ''}
+            onChange={(e) => handleSettingsChange('apiKey', e.target.value)}
+          />
+        </div>
+      )}
+
+      {/* Google Gemini API Key */}
+      {service === 'default' && (
+        <div>
+          <label className="block text-sm font-medium mb-1">
+            Google Gemini API Key
+          </label>
+          <input
+            type="password"
+            className="input"
+            placeholder="Required"
+            value={formState.settings?.apiKey || ''}
+            onChange={(e) => handleSettingsChange('apiKey', e.target.value)}
+          />
+        </div>
+      )}
+
+    </div>
+  );
+}

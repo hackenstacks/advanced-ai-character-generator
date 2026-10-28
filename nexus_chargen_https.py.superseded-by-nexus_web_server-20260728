@@ -1,0 +1,331 @@
+#!/usr/bin/env python3
+"""
+NeXuS Character Generator — Production HTTPS Server (Python, zero-dependency)
+
+Drop-in replacement for server-production.js. Pure Python stdlib — no node, no npm.
+Serves the built SPA (dist/) over HTTPS and acts as the SINGLE server-side egress
+point for all provider APIs, injecting keys from ~/.config/nexus/secrets/nexus.env
+so the browser never holds an sk_ key (NeXuS Rule Zero — Sane · Simple · Secure · Sustainable).
+
+Routes:
+  GET  /api/health                     -> liveness + which providers have keys
+  GET  /api/providers                  -> sanitized provider registry (NO secrets)
+  GET  /api/models/image               -> passthrough gen.pollinations.ai/image/models (keyless)
+  GET  /api/models/text                -> passthrough gen.pollinations.ai/text/models  (keyless)
+  GET  /api/pollinations/image?prompt=&model=&width=&height=
+                                       -> image proxy, key injected server-side (streams JPEG)
+  POST /api/llm                        -> generic OpenAI-compatible text proxy
+                                          body: { "provider": "pollinations", ...openAIPayload }
+                                          server picks base_url + key by provider id; streams SSE
+  *                                    -> static file from dist/ (SPA fallback to index.html)
+
+Usage:
+  python3 nexus_chargen_https.py [--port 8443] [--host 0.0.0.0]
+"""
+
+import os
+import sys
+import ssl
+import json
+import argparse
+import datetime
+import urllib.parse
+import urllib.request
+from pathlib import Path
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+# ── Paths / config ────────────────────────────────────────────────────────────
+BASE_DIR    = Path(__file__).resolve().parent
+DIST_DIR    = BASE_DIR / "dist"
+CERT_FILE   = BASE_DIR / "cert.pem"
+KEY_FILE    = BASE_DIR / "key.pem"
+SECRETS_DIR = Path(os.environ.get("HOME", "")) / ".config/nexus/secrets"
+
+MIME_TYPES = {
+    ".html": "text/html", ".js": "application/javascript", ".mjs": "application/javascript",
+    ".css": "text/css", ".json": "application/json", ".png": "image/png", ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg", ".gif": "image/gif", ".svg": "image/svg+xml", ".ico": "image/x-icon",
+    ".woff": "font/woff", ".woff2": "font/woff2", ".ttf": "font/ttf", ".otf": "font/otf",
+    ".eot": "application/vnd.ms-fontobject", ".wasm": "application/wasm", ".txt": "text/plain",
+    ".xml": "text/xml", ".map": "application/json",
+}
+
+SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "X-XSS-Protection": "1; mode=block",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "Permissions-Policy": "geolocation=(), microphone=(), camera=()",
+    "Content-Security-Policy": (
+        "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
+        "style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; "
+        "connect-src 'self' https: http://localhost:*; font-src 'self' data:;"
+    ),
+}
+
+# ── Provider registry (endpoints + which nexus.env var holds the key) ──────────
+# One place declares every OpenAI-compatible endpoint (OpenCharacters CUSTOM_ENDPOINTS
+# schema, keys server-side). requires_key=False => genuinely keyless (AI Horde).
+PROVIDERS = {
+    "pollinations": {"label": "Pollinations.ai", "base_url": "https://gen.pollinations.ai/v1",
+                     "key_env": "POLLINATIONS_API_KEY", "requires_key": True,  "kind": "chat+image"},
+    "openai":       {"label": "OpenAI",           "base_url": "https://api.openai.com/v1",
+                     "key_env": "OPENAI_API_KEY",       "requires_key": True,  "kind": "chat+image"},
+    "mistral":      {"label": "Mistral",          "base_url": "https://api.mistral.ai/v1",
+                     "key_env": "MISTRAL_API_KEY",      "requires_key": True,  "kind": "chat"},
+    "groq":         {"label": "Groq",             "base_url": "https://api.groq.com/openai/v1",
+                     "key_env": "GROQ_API_KEY",         "requires_key": True,  "kind": "chat"},
+    "openrouter":   {"label": "OpenRouter",       "base_url": "https://openrouter.ai/api/v1",
+                     "key_env": "OPENROUTER_API_KEY",   "requires_key": True,  "kind": "chat"},
+    "aichat":       {"label": "aichat (local)",   "base_url": "http://localhost:3030/v1",
+                     "key_env": None,                   "requires_key": False, "kind": "chat"},
+    "ollama":       {"label": "Ollama (local)",   "base_url": "http://localhost:11434/v1",
+                     "key_env": None,                   "requires_key": False, "kind": "chat"},
+    "aihorde":      {"label": "AI Horde (keyless)","base_url": "https://aihorde.net/api/v2",
+                     "key_env": None,                   "requires_key": False, "kind": "chat+image"},
+}
+DEFAULTS = {"main": "aihorde", "image": "pollinations", "embedding": "local"}
+
+POLLI_BASE = "https://gen.pollinations.ai"
+UA = "nexus-char-gen"
+
+
+def load_secret(name):
+    """Read a secret from nexus.env (KEY=value); legacy pollinations.key fallback."""
+    if not name:
+        return None
+    env = SECRETS_DIR / "nexus.env"
+    try:
+        for line in env.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            if k.strip() == name:
+                return v.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    if name == "POLLINATIONS_API_KEY":
+        try:
+            return (SECRETS_DIR / "pollinations.key").read_text(encoding="utf-8").strip()
+        except OSError:
+            pass
+    return None
+
+
+def log(msg):
+    print(f"[{datetime.datetime.now().isoformat(timespec='seconds')}] {msg}", flush=True)
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "NeXuS-CharGen-HTTPS/1.0"
+
+    # keep the log tidy / same-line format
+    def log_message(self, fmt, *args):
+        log(f"{self.address_string()} {fmt % args}")
+
+    # ── helpers ───────────────────────────────────────────────────────────────
+    def _send(self, code, ctype, extra=None):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        for k, v in SECURITY_HEADERS.items():
+            self.send_header(k, v)
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
+        self.end_headers()
+
+    def _json(self, obj, code=200):
+        body = json.dumps(obj).encode("utf-8")
+        self._send(code, "application/json", {"Content-Length": str(len(body)), "Cache-Control": "no-store"})
+        self.wfile.write(body)
+
+    # ── routing ───────────────────────────────────────────────────────────────
+    def do_GET(self):
+        path = urllib.parse.urlparse(self.path).path
+        if path == "/api/health":
+            return self._json({"ok": True, "providers_with_keys": self._keyed_providers()})
+        if path == "/api/providers":
+            return self._json(self._registry())
+        if path == "/api/models/image":
+            return self._passthrough(f"{POLLI_BASE}/image/models")
+        if path == "/api/models/text":
+            return self._passthrough(f"{POLLI_BASE}/text/models")
+        if path == "/api/pollinations/image":
+            return self._pollinations_image()
+        if path.startswith("/api/"):
+            return self._json({"error": f"unknown API route {path}"}, 404)
+        return self._serve_static(path)
+
+    def do_POST(self):
+        path = urllib.parse.urlparse(self.path).path
+        if path == "/api/llm":
+            return self._llm_proxy()
+        return self._json({"error": f"unknown API route {path}"}, 404)
+
+    def do_OPTIONS(self):
+        self._send(204, "text/plain", {
+            "Access-Control-Allow-Origin": "'self'",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type",
+        })
+
+    # ── registry / health ─────────────────────────────────────────────────────
+    def _keyed_providers(self):
+        out = {}
+        for pid, p in PROVIDERS.items():
+            out[pid] = (not p["requires_key"]) or bool(load_secret(p["key_env"]))
+        return out
+
+    def _registry(self):
+        """Sanitized: endpoints + capability flags + whether a key is present. NO secrets."""
+        keyed = self._keyed_providers()
+        providers = {}
+        for pid, p in PROVIDERS.items():
+            providers[pid] = {
+                "id": pid, "label": p["label"], "kind": p["kind"],
+                "requires_key": p["requires_key"], "key_present": keyed[pid],
+                "proxied": True,  # browser always calls same-origin /api/llm
+            }
+        return {"providers": providers, "defaults": DEFAULTS}
+
+    # ── passthrough (keyless model lists) ─────────────────────────────────────
+    def _passthrough(self, url):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": UA})
+            with urllib.request.urlopen(req, timeout=20) as up:
+                data = up.read()
+            self._send(200, up.headers.get("Content-Type", "application/json"),
+                       {"Content-Length": str(len(data)), "Cache-Control": "max-age=300"})
+            self.wfile.write(data)
+        except Exception as e:
+            self._json({"error": "passthrough failed", "detail": str(e)[:300]}, 502)
+
+    # ── image proxy (key injected server-side; streams image) ─────────────────
+    def _pollinations_image(self):
+        key = load_secret("POLLINATIONS_API_KEY")
+        if not key or not key.startswith("sk_"):
+            return self._json({"error": "No valid POLLINATIONS_API_KEY (sk_...) in nexus.env"}, 500)
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        prompt = (q.get("prompt", [""])[0]).strip()
+        if not prompt:
+            return self._json({"error": "Missing prompt"}, 400)
+        model  = q.get("model",  ["flux"])[0]
+        width  = q.get("width",  ["1024"])[0]
+        height = q.get("height", ["1024"])[0]
+        upstream = (f"{POLLI_BASE}/image/{urllib.parse.quote(prompt)}"
+                    f"?model={urllib.parse.quote(model)}&width={urllib.parse.quote(width)}"
+                    f"&height={urllib.parse.quote(height)}&nologo=true"
+                    f"&key={urllib.parse.quote(key)}&referrer={UA}")
+        log(f"[PROXY] pollinations image (model={model} {width}x{height}) key=sk_***")
+        try:
+            req = urllib.request.Request(upstream, headers={"User-Agent": UA})
+            with urllib.request.urlopen(req, timeout=120) as up:
+                self._send(200, up.headers.get("Content-Type", "image/jpeg"), {"Cache-Control": "no-store"})
+                while True:
+                    chunk = up.read(65536)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+        except urllib.error.HTTPError as e:
+            body = e.read()[:300].decode("utf-8", "replace")
+            self._json({"error": f"Pollinations {e.code}", "detail": body}, e.code)
+        except Exception as e:
+            self._json({"error": "Upstream request failed", "detail": str(e)[:300]}, 502)
+
+    # ── generic OpenAI-compatible text proxy ──────────────────────────────────
+    def _llm_proxy(self):
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            payload = json.loads(self.rfile.read(length) or b"{}")
+        except Exception as e:
+            return self._json({"error": "bad JSON body", "detail": str(e)[:200]}, 400)
+
+        pid = payload.pop("provider", None)
+        prov = PROVIDERS.get(pid or "")
+        if not prov:
+            return self._json({"error": f"unknown provider '{pid}'",
+                               "known": list(PROVIDERS)}, 400)
+        # allow caller to override endpoint for a truly-custom provider
+        base = (payload.pop("base_url", None) or prov["base_url"]).rstrip("/")
+        url = f"{base}/chat/completions"
+        headers = {"Content-Type": "application/json", "User-Agent": UA}
+        if prov["requires_key"]:
+            key = load_secret(prov["key_env"])
+            if not key:
+                return self._json({"error": f"{prov['label']} needs a key: set {prov['key_env']} in nexus.env"}, 502)
+            headers["Authorization"] = f"Bearer {key}"
+
+        want_stream = bool(payload.get("stream"))
+        body = json.dumps(payload).encode("utf-8")
+        log(f"[PROXY] llm {pid} -> {url} (stream={want_stream})")
+        try:
+            req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=180) as up:
+                ctype = up.headers.get("Content-Type", "application/json")
+                self._send(200, ctype, {"Cache-Control": "no-store"})
+                while True:
+                    chunk = up.read(8192)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    try:
+                        self.wfile.flush()
+                    except Exception:
+                        break
+        except urllib.error.HTTPError as e:
+            body = e.read()[:500].decode("utf-8", "replace")
+            self._json({"error": f"{prov['label']} {e.code}", "detail": body}, e.code)
+        except Exception as e:
+            self._json({"error": "Upstream request failed", "detail": str(e)[:300]}, 502)
+
+    # ── static files (dist/) with SPA fallback + traversal guard ──────────────
+    def _serve_static(self, path):
+        rel = "index.html" if path == "/" else path.lstrip("/")
+        target = (DIST_DIR / rel).resolve()
+        if not str(target).startswith(str(DIST_DIR.resolve())):
+            return self._json({"error": "forbidden"}, 403)
+        if not target.is_file():
+            target = DIST_DIR / "index.html"      # SPA fallback
+        try:
+            data = target.read_bytes()
+        except OSError:
+            return self._json({"error": "500"}, 500)
+        ctype = MIME_TYPES.get(target.suffix.lower(), "application/octet-stream")
+        self._send(200, ctype, {"Content-Length": str(len(data))})
+        self.wfile.write(data)
+
+
+def main():
+    ap = argparse.ArgumentParser(description="NeXuS Character Generator HTTPS server")
+    ap.add_argument("--port", type=int, default=8443)
+    ap.add_argument("--host", default="0.0.0.0")
+    args = ap.parse_args()
+
+    if not DIST_DIR.is_dir():
+        sys.exit(f"❌ dist/ not found at {DIST_DIR} — run the build first.")
+    if not (CERT_FILE.is_file() and KEY_FILE.is_file()):
+        sys.exit(f"❌ cert.pem/key.pem not found in {BASE_DIR}")
+
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(str(CERT_FILE), str(KEY_FILE))
+
+    httpd = ThreadingHTTPServer((args.host, args.port), Handler)
+    httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+
+    keyed = {pid: ((not p["requires_key"]) or bool(load_secret(p["key_env"])))
+             for pid, p in PROVIDERS.items()}
+    print("\n╔══════════════════════════════════════════════════════════════╗")
+    print("║   🔐 NeXuS CHARACTER GENERATOR — HTTPS (Python, no npm)      ║")
+    print("╚══════════════════════════════════════════════════════════════╝")
+    log(f"✅ HTTPS on https://localhost:{args.port}   serving {DIST_DIR}")
+    log(f"🔑 provider keys present: " + ", ".join(f"{k}={'yes' if v else 'no'}" for k, v in keyed.items()))
+    log("🛑 Ctrl+C to stop")
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        log("🛑 shutting down")
+        httpd.shutdown()
+
+
+if __name__ == "__main__":
+    main()
